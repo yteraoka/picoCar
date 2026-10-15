@@ -86,6 +86,18 @@ func RotateRight(deg int) {
 	stopQuiet()
 }
 
+// SpinLeft はその場での左回転を始めます (Stop を呼ぶまで回り続けます)。
+func SpinLeft() {
+	SetRight(config.RightDuty.Forward)
+	SetLeft(config.LeftDuty.Back)
+}
+
+// SpinRight はその場での右回転を始めます (Stop を呼ぶまで回り続けます)。
+func SpinRight() {
+	SetRight(config.RightDuty.Back)
+	SetLeft(config.LeftDuty.Forward)
+}
+
 func stopQuiet() {
 	SetRight(config.RightDuty.Stop)
 	SetLeft(config.LeftDuty.Stop)
