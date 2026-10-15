@@ -23,6 +23,7 @@ import (
 	"github.com/momorara/picoCar/tinygo/lib/picoled"
 	"github.com/momorara/picoCar/tinygo/lib/servo"
 	"github.com/momorara/picoCar/tinygo/lib/wifi"
+	"github.com/soypat/lneto"
 	"github.com/soypat/lneto/http/httpraw"
 	"github.com/soypat/lneto/tcp"
 	"github.com/soypat/lneto/x/xnet"
@@ -74,7 +75,7 @@ func main() {
 	picoled.UseDevice(network.Dev)
 	picoled.On()
 
-	pool, err := xnet.NewTCPPool(xnet.TCPPoolConfig{
+	pool, err := network.Stack.NewTCPPool(xnet.TCPPoolConfig{
 		PoolSize:           maxConns,
 		QueueSize:          maxConns,
 		TxBufSize:          len(webPage) + 256,
@@ -82,10 +83,11 @@ func main() {
 		EstablishedTimeout: 5 * time.Second,
 		ClosingTimeout:     5 * time.Second,
 		NewUserData: func() any {
-			hdr := new(httpraw.Header)
-			hdr.Reset(make([]byte, httpBuf))
+			hdr := new(httpraw.HeaderV1)
+			hdr.Reset(make([]byte, 0, httpBuf), 16)
 			return hdr
 		},
+		NewBackoff: func() lneto.BackoffStrategy { return connBackoff },
 	})
 	if err != nil {
 		panic("remote: TCP プール作成に失敗: " + err.Error())
@@ -94,7 +96,7 @@ func main() {
 	if err := listener.Reset(listenPort, pool); err != nil {
 		panic("remote: listener: " + err.Error())
 	}
-	if err := network.Stack.RegisterListener(&listener); err != nil {
+	if err := network.Stack.RegisterListenerTCP(&listener); err != nil {
 		panic("remote: listener 登録: " + err.Error())
 	}
 	println("操作画面: http://" + network.Addr.String() + "/")
@@ -107,12 +109,13 @@ func main() {
 			pool.CheckTimeouts()
 			continue
 		}
-		conn, userData, err := listener.TryAccept()
+		conn, err := listener.TryAccept()
 		if err != nil {
 			println("remote: accept:", err.Error())
 			continue
 		}
-		go handleConn(conn, userData.(*httpraw.Header))
+		println("接続:", conn.RemoteAddrPort().String())
+		go handleConn(conn, conn.UserData().(*httpraw.HeaderV1))
 	}
 }
 
@@ -163,18 +166,18 @@ func drive() {
 }
 
 // handleConn は 1 つの接続で届く HTTP リクエストに順に応答します (keep-alive)。
-func handleConn(conn *tcp.Conn, hdr *httpraw.Header) {
+func handleConn(conn tcp.ConnHandle, hdr *httpraw.HeaderV1) {
 	defer conn.Close()
 	var buf [256]byte
 	for {
-		hdr.Reset(nil)
+		hdr.Reset(nil, 0)
 		conn.SetReadDeadline(time.Now().Add(idleTime))
 		if !readRequest(conn, hdr, buf[:]) {
 			return
 		}
-		status, contentType, body := route(string(hdr.RequestURI()))
+		status, contentType, body := route(string(hdr.RequestPath()))
 
-		hdr.Reset(nil)
+		hdr.Reset(nil, 0)
 		hdr.SetProtocol("HTTP/1.1")
 		hdr.SetStatus(status, statusText(status))
 		hdr.Set("Content-Type", contentType)
@@ -195,13 +198,13 @@ func handleConn(conn *tcp.Conn, hdr *httpraw.Header) {
 }
 
 // readRequest はリクエストヘッダを最後まで読みます。接続が閉じられたら false を返します。
-func readRequest(conn *tcp.Conn, hdr *httpraw.Header, buf []byte) bool {
-	const asRequest = false // examples/http-server と同じ
+func readRequest(conn tcp.ConnHandle, hdr *httpraw.HeaderV1, buf []byte) bool {
+	const asResponse = false
 	for {
 		n, err := conn.Read(buf)
 		if n > 0 {
 			hdr.ReadFromBytes(buf[:n])
-			needMore, perr := hdr.TryParse(asRequest)
+			needMore, perr := hdr.TryParse(asResponse)
 			if perr != nil && !needMore {
 				println("remote: HTTP の解析に失敗:", perr.Error())
 				return false
@@ -230,6 +233,11 @@ func route(uri string) (status, contentType string, body []byte) {
 		return "200", "text/plain", []byte("ok")
 	}
 	return "404", "text/plain", []byte("not found")
+}
+
+// connBackoff は接続の読み書きで待つときの間隔です。
+func connBackoff(consecutive uint) time.Duration {
+	return min(time.Millisecond<<min(consecutive, 4), 10*time.Millisecond)
 }
 
 func statusText(status string) string {

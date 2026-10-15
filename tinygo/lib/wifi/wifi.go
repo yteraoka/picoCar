@@ -73,9 +73,17 @@ func Connect(cfg Config) (*Network, error) {
 		RandSeed:          time.Since(start).Nanoseconds(),
 		HardwareAddress:   mac,
 		MTU:               1500,
+		// 同じ LAN のスマホやパソコンへの返信を、ルーター経由ではなく直接送るために
+		// 受信したパケットから相手の MAC アドレスを覚えておく数。
+		PassivePeers: 8,
+		// ping に応答する (動作確認用)。
+		ICMPQueueLimit: 4,
 	})
 	if err != nil {
 		return nil, err
+	}
+	if err := n.Stack.EnableICMP(true); err != nil {
+		println("wifi: ping への応答を有効にできません:", err.Error())
 	}
 	dev.RecvEthHandle(n.Stack.IngressEthernet)
 	go n.loop()
@@ -93,13 +101,13 @@ func Connect(cfg Config) (*Network, error) {
 	if err := n.Stack.AssimilateDHCPResults(results); err != nil {
 		return nil, err
 	}
-	n.Addr = results.AssignedAddr
+	n.Addr = netip.AddrFrom4(results.AssignedAddr4)
 	if results.Router.IsValid() {
 		gw, err := rstack.DoResolveHardwareAddress6(results.Router, 500*time.Millisecond, 4)
 		if err != nil {
 			println("wifi: ルーターの MAC アドレスを取得できません:", err.Error())
 		} else {
-			n.Stack.SetGateway6(gw)
+			n.Stack.SetGatewayHardwareAddr(gw)
 		}
 	}
 	return n, nil
