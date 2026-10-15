@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>picoCar リモコン</title>
+<style>
+body { margin: 0; font-family: sans-serif; background: #222; color: #eee;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  min-height: 100vh; user-select: none; -webkit-user-select: none; touch-action: none; }
+h1 { font-size: 1.4em; margin: 0 0 8px; }
+#status { margin-bottom: 16px; color: #aaa; }
+#status.err { color: #f66; }
+.pad { display: grid; grid-template-columns: repeat(3, 96px); grid-template-rows: repeat(3, 96px); gap: 10px; }
+button { font-size: 2.2em; border: none; border-radius: 16px; background: #456; color: #fff;
+  -webkit-tap-highlight-color: transparent; }
+button.on { background: #49c; }
+#s { background: #a33; font-size: 1.1em; }
+</style>
+</head>
+<body>
+<h1>picoCar リモコン</h1>
+<div id="status">ボタンを押している間だけ動きます</div>
+<div class="pad">
+  <span></span><button id="f">▲</button><span></span>
+  <button id="l">↺</button><button id="s">停止</button><button id="r">↻</button>
+  <span></span><button id="b">▼</button><span></span>
+</div>
+<script>
+// 押している間は 250ms ごとに指示を送り続ける。picoCar は指示が途切れると停止する。
+const statusEl = document.getElementById("status");
+let current = "s";
+let sending = false;
+let timer = null;
+
+async function send() {
+  if (sending) return; // 前の送信が終わるまで待つ (次の送信で最新の指示を送る)
+  sending = true;
+  try {
+    const r = await fetch("/" + current, { cache: "no-store" });
+    if (!r.ok) throw new Error(r.status);
+    statusEl.textContent = { f: "前進", b: "後退", l: "左回転", r: "右回転", s: "停止" }[current];
+    statusEl.className = "";
+  } catch (e) {
+    statusEl.textContent = "通信エラー";
+    statusEl.className = "err";
+  }
+  sending = false;
+}
+
+function start(cmd) {
+  current = cmd;
+  send();
+  clearInterval(timer);
+  timer = setInterval(send, 250);
+}
+
+// 停止はすぐに送る。送信中だった前の指示と順番が入れ替わっても止まるよう、少し後にもう一度送る。
+function stop(force) {
+  clearInterval(timer);
+  timer = null;
+  if (current === "s" && !force) return;
+  current = "s";
+  sending = false;
+  send();
+  setTimeout(() => { if (current === "s") { sending = false; send(); } }, 300);
+}
+
+for (const id of ["f", "b", "l", "r"]) {
+  const btn = document.getElementById(id);
+  btn.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    btn.setPointerCapture(e.pointerId);
+    btn.classList.add("on");
+    start(id);
+  });
+  for (const ev of ["pointerup", "pointercancel", "lostpointercapture"]) {
+    btn.addEventListener(ev, () => { btn.classList.remove("on"); stop(false); });
+  }
+}
+document.getElementById("s").addEventListener("pointerdown", (e) => { e.preventDefault(); stop(true); });
+document.addEventListener("visibilitychange", () => stop(false));
+window.addEventListener("blur", () => stop(false));
+document.addEventListener("contextmenu", (e) => e.preventDefault());
+</script>
+</body>
+</html>

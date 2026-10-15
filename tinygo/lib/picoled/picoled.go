@@ -30,6 +30,12 @@ func Configure() {
 	})
 }
 
+// UseDevice は初期化済みの無線チップを LED の制御に使います。
+// 無線 LAN で無線チップを初期化したプログラムでは、Configure の代わりにこれを呼びます。
+func UseDevice(d *cyw43439.Device) {
+	once.Do(func() { dev = d })
+}
+
 // Set は LED を点灯 (true) / 消灯 (false) します。
 func Set(on bool) {
 	Configure()

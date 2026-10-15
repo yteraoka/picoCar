@@ -26,6 +26,8 @@ Raspberry Pi Pico 2 W (RP2350) で動くようにしたものです。
 | `cmd/adjust_stop` | `adjust_stop.py` | サーボの停止値を求める |
 | `cmd/faraway` | `lib_servo.py` の `main()` | 一番遠い方向を向く |
 | `cmd/test_*` | 各 `lib_*.py` の `main()` | センサー・LED の動作確認 |
+| `lib/wifi` | (TinyGo 版のみ) | 無線 LAN への接続 |
+| `cmd/remote` | (TinyGo 版のみ) | スマホのブラウザから無線 LAN で操作するリモコン |
 
 ## Python 版との違い
 
@@ -156,3 +158,29 @@ WSL2 からは Windows の COM ポートを直接開けません。
 3. `make flash-wsl PROG=adjust_rotate_left` / `adjust_rotate_right` — 180 度回転する時間を
    `LeftRotateTime` / `RightRotateTime` に設定 (説明資料/左右回転の調整.txt)
 4. `make flash-wsl PROG=main` — 本番のプログラムを書き込む
+
+## 無線 LAN リモコン (cmd/remote)
+
+スマホやパソコンのブラウザから、無線 LAN 経由で picoCar を操作します。
+picoCar は家庭などの無線 LAN ルーター (2.4GHz) に接続し、スマホも同じ無線 LAN につなぎます。
+
+1. `tinygo/wifi.mk` を作り、無線 LAN の SSID とパスワードを書きます (このファイルは git 管理外です)。
+
+   ```make
+   WIFI_SSID = my-network
+   WIFI_PASSWORD = my-password
+   # WIFI_IP = 192.168.1.50   # 希望する IP アドレス (省略可。ルーターが応じるとは限りません)
+   ```
+
+   `make flash-wsl PROG=remote WIFI_SSID=xxxx WIFI_PASSWORD=yyyy` のように引数で指定することもできます。
+   パスワードに `'` や `$` が含まれる場合はうまく渡せないことがあります。
+2. `make flash-wsl PROG=remote` で書き込みます。
+3. 電源を入れると数秒で無線 LAN に接続し、基板上の LED が点灯します。
+   picoCar の IP アドレスはシリアル出力 (`make monitor` など) に `操作画面: http://192.168.x.x/` と表示されます。
+   ルーターの管理画面で `picocar` という名前の機器を探して確認することもできます。
+4. スマホのブラウザでそのアドレスを開き、ボタンを押している間だけ前進・後退・左右回転します。
+
+安全のため、画面からの指示が 0.8 秒届かなければ停止します (ボタンを離したとき、画面を切り替えたとき、
+無線 LAN が切れたときなど)。無線 LAN に接続できない場合は停止したまま、シリアル出力にエラーを表示し続けます。
+無線 LAN の部分は [soypat/cyw43439](https://github.com/soypat/cyw43439) と
+[soypat/lneto](https://github.com/soypat/lneto) を使っています。
