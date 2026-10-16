@@ -16,6 +16,14 @@ button { font-size: 2.2em; border: none; border-radius: 16px; background: #456; 
   -webkit-tap-highlight-color: transparent; }
 button.on { background: #49c; }
 #s { background: #a33; font-size: 1.1em; }
+.trim { margin-top: 28px; width: 308px; text-align: center; }
+.trim .row { display: flex; align-items: center; gap: 8px; }
+.trim button { font-size: 1.2em; width: 48px; height: 44px; border-radius: 10px; flex: none; }
+.trim input { flex: 1; touch-action: pan-x; }
+.trim .labels { display: flex; justify-content: space-between; font-size: 0.85em; color: #aaa; margin: 4px 56px 0; }
+#trimVal { margin: 6px 0; }
+#duty { font-size: 0.8em; color: #aaa; font-family: monospace; }
+#trim0 { width: auto; padding: 0 12px; font-size: 0.9em; margin-top: 8px; }
 </style>
 </head>
 <body>
@@ -25,6 +33,17 @@ button.on { background: #49c; }
   <span></span><button id="f">▲</button><span></span>
   <button id="l">↺</button><button id="s">停止</button><button id="r">↻</button>
   <span></span><button id="b">▼</button><span></span>
+</div>
+<div class="trim">
+  <div id="trimVal">左右バランス: 0</div>
+  <div class="row">
+    <button id="trimDown">◀</button>
+    <input type="range" id="trimRange" min="-200" max="200" step="2" value="0">
+    <button id="trimUp">▶</button>
+  </div>
+  <div class="labels"><span>左を速く</span><span>右を速く</span></div>
+  <button id="trim0">0 に戻す</button>
+  <div id="duty"></div>
 </div>
 <script>
 // 押している間は 250ms ごとに指示を送り続ける。picoCar は指示が途切れると停止する。
@@ -82,6 +101,69 @@ document.getElementById("s").addEventListener("pointerdown", (e) => { e.preventD
 document.addEventListener("visibilitychange", () => stop(false));
 window.addEventListener("blur", () => stop(false));
 document.addEventListener("contextmenu", (e) => e.preventDefault());
+
+// 左右バランス (トリム)。前進が左にずれる (左車輪が遅い) なら「左を速く」側へ動かす。
+// picoCar は再起動するとトリムが 0 に戻るので、ブラウザに覚えておいて開いたときに送り直す。
+const trimRange = document.getElementById("trimRange");
+const trimVal = document.getElementById("trimVal");
+const dutyEl = document.getElementById("duty");
+let trimWant = null;   // 送りたい値 (送信中に変わったら送信後にもう一度送る)
+let trimSending = false;
+
+function showTrim(j) {
+  trimRange.max = j.max;
+  trimRange.min = -j.max;
+  trimRange.value = j.trim;
+  const t = j.trim;
+  trimVal.textContent = "左右バランス: " + (t > 0 ? "右 +" + t : t < 0 ? "左 +" + (-t) : "0");
+  dutyEl.textContent = "RightDuty Forward:" + j.rf + " Back:" + j.rb +
+    " / LeftDuty Forward:" + j.lf + " Back:" + j.lb;
+}
+
+async function sendTrim(t) {
+  trimWant = t;
+  try { localStorage.setItem("trim", String(t)); } catch (e) {}
+  if (trimSending) return;
+  trimSending = true;
+  while (trimWant !== null) {
+    const v = trimWant;
+    trimWant = null;
+    try {
+      const r = await fetch("/t/" + v, { cache: "no-store" });
+      if (!r.ok) throw new Error(r.status);
+      showTrim(await r.json());
+    } catch (e) {
+      trimVal.textContent = "左右バランス: 通信エラー";
+    }
+  }
+  trimSending = false;
+}
+
+function stepTrim(d) {
+  sendTrim(Math.max(+trimRange.min, Math.min(+trimRange.max, +trimRange.value + d)));
+}
+
+trimRange.addEventListener("input", () => sendTrim(+trimRange.value));
+document.getElementById("trimDown").addEventListener("click", () => stepTrim(-2));
+document.getElementById("trimUp").addEventListener("click", () => stepTrim(2));
+document.getElementById("trim0").addEventListener("click", () => sendTrim(0));
+
+(async () => {
+  let saved = null;
+  try { saved = localStorage.getItem("trim"); } catch (e) {}
+  try {
+    const r = await fetch("/t", { cache: "no-store" });
+    const j = await r.json();
+    if (j.trim === 0 && saved !== null && +saved !== 0) {
+      sendTrim(+saved); // picoCar が再起動していたら覚えていた値を送り直す
+    } else {
+      showTrim(j);
+      try { localStorage.setItem("trim", String(j.trim)); } catch (e) {}
+    }
+  } catch (e) {
+    trimVal.textContent = "左右バランス: 通信エラー";
+  }
+})();
 </script>
 </body>
 </html>
