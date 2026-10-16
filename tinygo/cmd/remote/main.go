@@ -4,6 +4,11 @@
 // http://<picoCar の IP アドレス>/ を開くと操作画面が表示され、ボタンを押している間だけ
 // 前進・後退・左右回転します。IP アドレスはシリアル出力 (make monitor) に表示されます。
 //
+// 画面のスライダーで左右の車輪の回転数のバランス (トリム) を調整できます。前進・後退が
+// まっすぐ進むように調整し、表示されたデューティ値を config/config.go に書けば他の
+// プログラムにも反映できます。トリムは picoCar を再起動すると 0 に戻ります
+// (画面側でブラウザに覚えておき、開き直したときに送り直します)。
+//
 // 無線 LAN の SSID とパスワードはビルド時に指定します (README.md 参照)。
 //
 //	make build PROG=remote WIFI_SSID=xxxx WIFI_PASSWORD=yyyy
@@ -20,6 +25,7 @@ import (
 
 	_ "embed"
 
+	"github.com/momorara/picoCar/tinygo/config"
 	"github.com/momorara/picoCar/tinygo/lib/picoled"
 	"github.com/momorara/picoCar/tinygo/lib/servo"
 	"github.com/momorara/picoCar/tinygo/lib/wifi"
@@ -44,6 +50,7 @@ const (
 	idleTime   = 10 * time.Second       // この間リクエストがなければ接続を閉じる
 	timeout    = 800 * time.Millisecond // この間指示がなければ停止 (画面は 250ms ごとに送る)
 	tick       = 20 * time.Millisecond  // 走行状態を確認する間隔
+	maxTrim    = 200                    // トリムの最大値 (デューティ値の差)
 )
 
 //go:embed index.html
@@ -119,12 +126,49 @@ func main() {
 	}
 }
 
-// 走行指示。画面から届いた最新の指示と、その時刻を保持します。
+// 走行指示。画面から届いた最新の指示と、その時刻、左右のバランス (トリム) を保持します。
+//
+// トリムが正なら右車輪を速く、負なら左車輪を速くします。前進・後退のとき、
+// 速くする側の車輪を停止値から trim/2、遅くする側を trim/2 だけ離したり近づけたりします。
 var (
 	mu      sync.Mutex
 	command byte = 's'
 	lastCmd time.Time
+	trim    int
 )
+
+func setTrim(t int) int {
+	t = max(-maxTrim, min(t, maxTrim))
+	mu.Lock()
+	trim = t
+	mu.Unlock()
+	return t
+}
+
+func getTrim() int {
+	mu.Lock()
+	defer mu.Unlock()
+	return trim
+}
+
+// trimmed はトリムを反映した前進・後退のデューティ値を返します。
+func trimmed(t int) (right, left config.Duty) {
+	right, left = config.RightDuty, config.LeftDuty
+	rd, ld := t/2, -(t - t/2)
+	right.Forward = speedUp(right.Forward, right.Stop, rd)
+	right.Back = speedUp(right.Back, right.Stop, rd)
+	left.Forward = speedUp(left.Forward, left.Stop, ld)
+	left.Back = speedUp(left.Back, left.Stop, ld)
+	return right, left
+}
+
+// speedUp はデューティ値を停止値から delta だけ遠ざけます (負なら近づけます)。
+func speedUp(duty, stop uint16, delta int) uint16 {
+	if duty < stop {
+		delta = -delta
+	}
+	return uint16(max(0, min(int(duty)+delta, 65535)))
+}
 
 func setCommand(c byte) {
 	mu.Lock()
@@ -136,6 +180,7 @@ func setCommand(c byte) {
 // drive は指示に合わせてサーボを動かします。指示が timeout の間届かなければ停止します。
 func drive() {
 	current := byte('s')
+	currentTrim := 0
 	for {
 		mu.Lock()
 		c := command
@@ -144,14 +189,21 @@ func drive() {
 			c = 's'
 			command = 's'
 		}
+		t := trim
 		mu.Unlock()
 
-		if c != current {
+		// 走行中にトリムが変わったらすぐ反映する
+		if c != current || (t != currentTrim && (c == 'f' || c == 'b')) {
+			right, left := trimmed(t)
 			switch c {
 			case 'f':
-				servo.Run()
+				println("前進", left.Forward, right.Forward)
+				servo.SetRight(right.Forward)
+				servo.SetLeft(left.Forward)
 			case 'b':
-				servo.Back()
+				println("後退", left.Back, right.Back)
+				servo.SetRight(right.Back)
+				servo.SetLeft(left.Back)
 			case 'l':
 				servo.SpinLeft()
 			case 'r':
@@ -160,6 +212,7 @@ func drive() {
 				servo.Stop()
 			}
 			current = c
+			currentTrim = t
 		}
 		time.Sleep(tick)
 	}
@@ -224,6 +277,7 @@ func readRequest(conn tcp.ConnHandle, hdr *httpraw.HeaderV1, buf []byte) bool {
 }
 
 // route は URI に対応する応答を返します。/f /b /l /r /s は走行指示です。
+// /t は現在のトリム、/t/<数値> はトリムの設定で、trimInfo の内容を返します。
 func route(uri string) (status, contentType string, body []byte) {
 	switch uri {
 	case "/":
@@ -231,8 +285,41 @@ func route(uri string) (status, contentType string, body []byte) {
 	case "/f", "/b", "/l", "/r", "/s":
 		setCommand(uri[1])
 		return "200", "text/plain", []byte("ok")
+	case "/t":
+		return "200", "application/json", trimInfo(getTrim())
+	}
+	if len(uri) > 3 && uri[:3] == "/t/" {
+		t, err := strconv.Atoi(uri[3:])
+		if err != nil {
+			return "400", "text/plain", []byte("bad trim")
+		}
+		t = setTrim(t)
+		println("トリム", t)
+		return "200", "application/json", trimInfo(t)
 	}
 	return "404", "text/plain", []byte("not found")
+}
+
+// trimInfo はトリムと、それを反映した前進・後退のデューティ値を JSON で返します。
+func trimInfo(t int) []byte {
+	right, left := trimmed(t)
+	b := make([]byte, 0, 128)
+	b = append(b, `{"trim":`...)
+	b = strconv.AppendInt(b, int64(t), 10)
+	b = append(b, `,"max":`...)
+	b = strconv.AppendInt(b, maxTrim, 10)
+	for _, d := range []struct {
+		name string
+		v    uint16
+	}{
+		{"rf", right.Forward}, {"rb", right.Back}, {"lf", left.Forward}, {"lb", left.Back},
+	} {
+		b = append(b, `,"`...)
+		b = append(b, d.name...)
+		b = append(b, `":`...)
+		b = strconv.AppendUint(b, uint64(d.v), 10)
+	}
+	return append(b, '}')
 }
 
 // connBackoff は接続の読み書きで待つときの間隔です。
@@ -241,8 +328,11 @@ func connBackoff(consecutive uint) time.Duration {
 }
 
 func statusText(status string) string {
-	if status == "200" {
+	switch status {
+	case "200":
 		return "OK"
+	case "400":
+		return "Bad Request"
 	}
 	return "Not Found"
 }
